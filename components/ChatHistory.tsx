@@ -79,7 +79,19 @@ const PartRenderer: React.FC<{ part: ClaudePart; role: string }> = ({ part, role
   }
 };
 
+// content can be a plain string ("content": "hello") instead of a parts array
+const normalizeParts = (content: ClaudeMessage['content']): ClaudePart[] => {
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }];
+  }
+  return Array.isArray(content) ? content : [];
+};
+
 const ChatHistory: React.FC<ChatHistoryProps> = ({ history }) => {
+  const systemBlocks = typeof history.system === 'string'
+    ? [{ type: 'text', text: history.system }]
+    : (Array.isArray(history.system) ? history.system : []);
+
   return (
     <div className="space-y-12 pb-12">
       {/* Metadata Header */}
@@ -117,7 +129,7 @@ const ChatHistory: React.FC<ChatHistoryProps> = ({ history }) => {
               </div>
               
               <div>
-                {msg.content.map((part, pIdx) => (
+                {normalizeParts(msg.content).map((part, pIdx) => (
                   <PartRenderer key={pIdx} part={part} role={msg.role} />
                 ))}
               </div>
@@ -130,17 +142,17 @@ const ChatHistory: React.FC<ChatHistoryProps> = ({ history }) => {
       <div className="space-y-6">
         <details className="group border-t border-slate-200 pt-8">
           <summary className="flex items-center justify-between cursor-pointer list-none">
-            <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">System Instructions ({history.system?.length || 0} Blocks)</h3>
+            <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">System Instructions ({systemBlocks.length} Blocks)</h3>
             <svg className="w-4 h-4 text-slate-300 group-open:rotate-180 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M19 9l-7 7-7-7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
           </summary>
           <div className="space-y-3 mt-4">
-             {history.system?.map((item: any, i: number) => (
+             {systemBlocks.map((item: any, i: number) => (
                <div key={i} className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm text-slate-600 leading-relaxed shadow-sm">
                  <div className="text-[9px] font-bold text-slate-400 uppercase mb-2">Block {i+1} ({item.type})</div>
                  <div className="whitespace-pre-wrap">{item.text || JSON.stringify(item)}</div>
                </div>
              ))}
-             {(!history.system || history.system.length === 0) && (
+             {systemBlocks.length === 0 && (
                <div className="text-sm text-slate-400 italic">No system instructions provided.</div>
              )}
           </div>

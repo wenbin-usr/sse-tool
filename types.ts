@@ -46,13 +46,13 @@ export interface ClaudePart {
 
 export interface ClaudeMessage {
   role: 'user' | 'assistant';
-  content: ClaudePart[];
+  content: string | ClaudePart[];
 }
 
 export interface ClaudeChatHistory {
   model: string;
   messages: ClaudeMessage[];
-  system?: any[];
+  system?: string | any[];
   tools?: any[];
   usage?: any;
 }
