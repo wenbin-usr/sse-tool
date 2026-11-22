@@ -1,7 +1,6 @@
-
 import React, { useState, useEffect, useCallback } from 'react';
 import { parseRawSSE, reconstructMessage } from './services/sseParser';
-import { SSEEvent, MessageState, ClaudeChatHistory } from './types';
+import { SSEEvent, MessageState, ClaudeChatHistory, SSEFormat } from './types';
 import EventItem from './components/EventItem';
 import MessagePreview from './components/MessagePreview';
 import ChatHistory from './components/ChatHistory';
@@ -71,15 +70,152 @@ const EXAMPLE_HTTP = `{
     ]
 }`;
 
+// Bailian/DashScope example built from real JSON objects so escaping stays valid.
+const BAILIAN_REQUEST_ID = '8b26e699-411a-9bb6-9ec2-2314a3af5a72';
+
+const bailianUsage = (outputTokens: number, reasoningTokens = 0) => ({
+  input_tokens: 6715,
+  output_tokens: outputTokens,
+  total_tokens: 6715 + outputTokens,
+  output_tokens_details: {
+    reasoning_tokens: reasoningTokens,
+    text_tokens: outputTokens - reasoningTokens,
+  },
+  prompt_tokens_details: { cached_tokens: 0 },
+  input_tokens_details: { text_tokens: 6715 },
+});
+
+const bailianChunk = (message: any, outputTokens: number, reasoningTokens = 0, finishReason = 'null') => ({
+  output: {
+    choices: [{ finish_reason: finishReason, message, index: 0 }],
+  },
+  usage: bailianUsage(outputTokens, reasoningTokens),
+  request_id: BAILIAN_REQUEST_ID,
+});
+
+const EXAMPLE_BAILIAN = [
+  bailianChunk(
+    {
+      role: 'assistant',
+      content: [],
+      reasoning_content: '用户想查看工作区里的技能文件。',
+    },
+    12,
+    12,
+  ),
+  bailianChunk(
+    {
+      role: 'assistant',
+      content: [],
+      reasoning_content: '先看看目录结构。',
+    },
+    21,
+    21,
+  ),
+  bailianChunk(
+    {
+      role: 'assistant',
+      content: [{ text: '我来' }],
+      reasoning_content: '',
+    },
+    26,
+    21,
+  ),
+  bailianChunk(
+    {
+      role: 'assistant',
+      content: [{ text: '查看工作区目录。' }],
+      reasoning_content: '',
+    },
+    31,
+    21,
+  ),
+  bailianChunk(
+    {
+      role: 'assistant',
+      content: [],
+      reasoning_content: '',
+      tool_calls: [
+        {
+          id: 'call_8b26e699',
+          index: 0,
+          type: 'function',
+          function: { name: 'list_directory', arguments: '' },
+        },
+      ],
+    },
+    49,
+    21,
+  ),
+  bailianChunk(
+    {
+      role: 'assistant',
+      content: [],
+      reasoning_content: '',
+      tool_calls: [
+        {
+          id: '',
+          index: 0,
+          type: 'function',
+          function: { arguments: '{"path":"' },
+        },
+      ],
+    },
+    52,
+    21,
+  ),
+  bailianChunk(
+    {
+      role: 'assistant',
+      content: [],
+      reasoning_content: '',
+      tool_calls: [
+        {
+          id: '',
+          index: 0,
+          type: 'function',
+          function: { arguments: '-workspace_skills"}' },
+        },
+      ],
+    },
+    63,
+    21,
+  ),
+  bailianChunk(
+    {
+      role: 'assistant',
+      content: [],
+      reasoning_content: '',
+    },
+    63,
+    21,
+    'tool_calls',
+  ),
+]
+  .map(
+    (payload, index) =>
+      `id:${index + 1}\nevent:result\n:HTTP_STATUS/200\ndata:${JSON.stringify(payload)}\n`,
+  )
+  .join('\n');
+
+const FORMAT_META: Record<SSEFormat, { label: string; className: string }> = {
+  claude: { label: 'CLAUDE', className: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
+  openai: { label: 'OPENAI', className: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
+  bailian: { label: 'BAILIAN', className: 'bg-amber-100 text-amber-700 border-amber-200' },
+  unknown: { label: 'UNKNOWN', className: 'bg-slate-100 text-slate-600 border-slate-200' },
+};
+
 const App: React.FC = () => {
   const [inputText, setInputText] = useState('');
   const [viewMode, setViewMode] = useState<'sse' | 'dialogue'>('sse');
   const [events, setEvents] = useState<SSEEvent[]>([]);
   const [messageState, setMessageState] = useState<MessageState>({ blocks: [] });
   const [chatHistory, setChatHistory] = useState<ClaudeChatHistory | null>(null);
+  const [cumulative, setCumulative] = useState(false);
 
   const handleParse = useCallback(() => {
     if (!inputText.trim()) {
+      setViewMode('sse');
       setEvents([]);
       setMessageState({ blocks: [] });
       setChatHistory(null);
@@ -92,6 +228,8 @@ const App: React.FC = () => {
       if (json.messages && Array.isArray(json.messages)) {
         setViewMode('dialogue');
         setChatHistory(json);
+        setEvents([]);
+        setMessageState({ blocks: [] });
         return;
       }
     } catch (e) {
@@ -100,19 +238,26 @@ const App: React.FC = () => {
 
     // Default to SSE
     setViewMode('sse');
+    setChatHistory(null);
     const parsed = parseRawSSE(inputText);
     setEvents(parsed);
-    const reconstructed = reconstructMessage(parsed);
-    setMessageState(reconstructed);
-  }, [inputText]);
+    setMessageState(
+      reconstructMessage(parsed, {
+        chunkMode: cumulative ? 'cumulative' : 'incremental',
+      }),
+    );
+  }, [inputText, cumulative]);
 
   useEffect(() => {
     handleParse();
   }, [handleParse]);
 
+  const format = messageState.format ?? 'unknown';
+  const formatMeta = FORMAT_META[format];
+
   return (
     <div className="min-h-screen flex flex-col">
-      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between sticky top-0 z-10 shadow-sm">
+      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between gap-4 flex-wrap sticky top-0 z-10 shadow-sm">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-indigo-600 rounded-lg flex items-center justify-center text-white shadow-lg shadow-indigo-200">
             <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -120,27 +265,41 @@ const App: React.FC = () => {
             </svg>
           </div>
           <div>
-            <h1 className="text-lg font-bold text-slate-800">Claude Protocol Inspector</h1>
-            <p className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">Teaching Tool for AI Dialogue Analysis</p>
+            <h1 className="text-lg font-bold text-slate-800">SSE Protocol Inspector</h1>
+            <p className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">
+              Claude · OpenAI · Bailian (DashScope) stream analysis
+            </p>
           </div>
         </div>
-        
-        <div className="flex items-center gap-3">
-          <button 
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
             onClick={() => setInputText(EXAMPLE_SSE)}
-            className="px-4 py-2 text-xs font-semibold text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors border border-indigo-100"
+            className="px-3 py-2 text-xs font-semibold text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors border border-indigo-100"
           >
-            Load SSE Example
+            Claude SSE
           </button>
-          <button 
+          <button
+            onClick={() => setInputText(EXAMPLE_BAILIAN)}
+            className="px-3 py-2 text-xs font-semibold text-amber-600 hover:bg-amber-50 rounded-lg transition-colors border border-amber-100"
+          >
+            Bailian SSE
+          </button>
+          <button
             onClick={() => setInputText(EXAMPLE_HTTP)}
-            className="px-4 py-2 text-xs font-semibold text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors border border-emerald-100"
+            className="px-3 py-2 text-xs font-semibold text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors border border-emerald-100"
           >
-            Load Dialogue Example
+            Dialogue JSON
           </button>
-          <button 
-            onClick={() => { setInputText(''); setEvents([]); setChatHistory(null); }}
-            className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 rounded-lg transition-colors border border-slate-200"
+          <button
+            onClick={() => {
+              setInputText('');
+              setEvents([]);
+              setMessageState({ blocks: [] });
+              setChatHistory(null);
+              setViewMode('sse');
+            }}
+            className="px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 rounded-lg transition-colors border border-slate-200"
           >
             Clear
           </button>
@@ -151,37 +310,79 @@ const App: React.FC = () => {
         {/* Input Pane */}
         <div className="w-full md:w-1/3 flex flex-col border-r border-slate-200 h-[calc(100vh-73px)]">
           <div className="p-4 bg-slate-50 border-b border-slate-200">
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 flex justify-between items-center">
+            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 flex justify-between items-center gap-2">
               <span>RAW DATA INPUT</span>
-              <span className={`px-2 py-0.5 rounded ${viewMode === 'sse' ? 'bg-indigo-100 text-indigo-600' : 'bg-emerald-100 text-emerald-600'}`}>
-                Detected: {viewMode.toUpperCase()}
+              <span
+                className={`px-2 py-0.5 rounded border font-bold ${
+                  viewMode === 'dialogue'
+                    ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
+                    : formatMeta.className
+                }`}
+              >
+                {viewMode === 'dialogue'
+                  ? 'DIALOGUE'
+                  : format === 'unknown'
+                    ? 'SSE'
+                    : `SSE · ${formatMeta.label}`}
               </span>
             </div>
-            <textarea 
+            <textarea
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              placeholder="Paste SSE text stream OR Claude Dialogue JSON..."
+              placeholder="Paste an SSE stream (Claude, OpenAI compatible or Bailian/DashScope), or a Claude dialogue JSON..."
               className="w-full h-48 p-4 bg-white border border-slate-200 rounded-xl shadow-inner focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all outline-none text-[10px] mono resize-none"
             />
+            {viewMode === 'sse' && (
+              <label className="mt-3 flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={cumulative}
+                  onChange={(e) => setCumulative(e.target.checked)}
+                  className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                />
+                <span className="text-[11px] leading-snug text-slate-500">
+                  Chunks are cumulative snapshots
+                  <span className="block text-[10px] text-slate-400">
+                    Bailian `incremental_output=false`; leave off for incremental deltas.
+                  </span>
+                </span>
+              </label>
+            )}
           </div>
 
           <div className="flex-1 flex flex-col overflow-hidden">
             {viewMode === 'sse' ? (
               <>
                 <div className="px-4 py-3 bg-white border-b border-slate-200">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Event Sequence ({events.length})</span>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                    Event Sequence ({events.length})
+                  </span>
                 </div>
                 <div className="flex-1 overflow-y-auto bg-white">
-                  {events.map((ev) => <EventItem key={ev.id} event={ev} />)}
+                  {events.length === 0 ? (
+                    <div className="p-6 text-xs text-slate-400 italic">
+                      Paste a stream above to inspect individual events.
+                    </div>
+                  ) : (
+                    events.map((ev, index) => (
+                      <EventItem key={`${ev.id ?? 'event'}-${index}`} event={ev} />
+                    ))
+                  )}
                 </div>
               </>
             ) : (
               <div className="flex-1 flex flex-col bg-slate-100 p-8 items-center justify-center text-center space-y-4">
                 <div className="w-16 h-16 rounded-full bg-emerald-200 flex items-center justify-center text-emerald-600">
-                  <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                  <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
                 </div>
                 <h3 className="font-bold text-slate-700">Dialogue Mode Active</h3>
-                <p className="text-xs text-slate-500 leading-relaxed">Direct conversation history detected.<br/>Visualizing the full turn sequence on the right.</p>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Direct conversation history detected.
+                  <br />
+                  Visualizing the full turn sequence on the right.
+                </p>
               </div>
             )}
           </div>
@@ -190,11 +391,18 @@ const App: React.FC = () => {
         {/* View Pane */}
         <div className="w-full md:w-2/3 flex flex-col h-[calc(100vh-73px)] bg-slate-50">
           <div className="px-6 py-4 bg-white border-b border-slate-200 flex items-center justify-between shadow-sm z-[5]">
-             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Visual Reconstruction</span>
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+              Visual Reconstruction
+            </span>
+            {viewMode === 'sse' && format !== 'unknown' && (
+              <span className={`px-2 py-0.5 rounded border text-[10px] font-bold ${formatMeta.className}`}>
+                {formatMeta.label}
+              </span>
+            )}
           </div>
           <div className="flex-1 overflow-y-auto p-8 scroll-smooth">
             {viewMode === 'sse' ? (
-              <MessagePreview state={messageState} />
+              <MessagePreview state={messageState} hasEvents={events.length > 0} />
             ) : chatHistory ? (
               <ChatHistory history={chatHistory} />
             ) : null}

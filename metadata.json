@@ -1,5 +1,5 @@
 {
   "name": "SSE Stream Inspector",
-  "description": "A powerful developer tool to parse, visualize, and reconstruct raw Server-Sent Events (SSE) streams, specifically optimized for Claude-style model outputs including thinking blocks and tool calls.",
+  "description": "A developer tool to parse, visualize, and reconstruct raw Server-Sent Events (SSE) streams from Claude/Anthropic, OpenAI-compatible, and Alibaba Bailian (DashScope) models, including reasoning content, text fragments and streaming tool calls.",
   "requestFramePermissions": []
 }

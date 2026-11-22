@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { SSEEvent } from '../types';
 
@@ -16,36 +15,58 @@ const EventItem: React.FC<EventItemProps> = ({ event }) => {
       case 'content_block_delta': return 'bg-amber-50 text-amber-700 border-amber-200';
       case 'content_block_stop': return 'bg-purple-100 text-purple-700 border-purple-200';
       case 'message_stop': return 'bg-red-100 text-red-700 border-red-200';
+      case 'result': return 'bg-amber-100 text-amber-700 border-amber-200';
+      case 'error': return 'bg-red-100 text-red-700 border-red-200';
+      case 'message': return 'bg-sky-100 text-sky-700 border-sky-200';
       case 'ping': return 'bg-gray-100 text-gray-500 border-gray-200';
       default: return 'bg-slate-100 text-slate-700 border-slate-200';
     }
   };
 
+  const dataPreview = event.data.length > 120 ? `${event.data.substring(0, 120)}...` : event.data;
+  const formattedPayload =
+    event.parsedData === undefined ? event.data : JSON.stringify(event.parsedData, null, 2);
+
   return (
     <div className="border-b border-slate-200 last:border-0">
-      <button 
+      <button
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-slate-50 transition-colors text-left"
+        className="w-full flex items-center gap-2 px-4 py-3 hover:bg-slate-50 transition-colors text-left"
       >
         <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${getEventColor(event.event)}`}>
           {event.event}
         </span>
+        {event.id && (
+          <span className="text-[10px] mono text-slate-400 shrink-0">#{event.id}</span>
+        )}
         <span className="flex-1 text-xs text-slate-600 truncate mono">
-          {event.data.substring(0, 100)}{event.data.length > 100 ? '...' : ''}
+          {dataPreview}
         </span>
-        <svg 
-          className={`w-4 h-4 text-slate-400 transition-transform ${isOpen ? 'rotate-180' : ''}`} 
+        <svg
+          className={`w-4 h-4 shrink-0 text-slate-400 transition-transform ${isOpen ? 'rotate-180' : ''}`}
           fill="none" viewBox="0 0 24 24" stroke="currentColor"
         >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="19 9l-7 7-7-7" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
-      
+
       {isOpen && (
         <div className="px-4 pb-4 bg-slate-50 border-t border-slate-100">
+          {event.comments && event.comments.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-1">
+              {event.comments.map((comment, index) => (
+                <span
+                  key={index}
+                  className="px-2 py-0.5 rounded bg-white border border-slate-200 text-[10px] mono text-slate-500"
+                >
+                  {comment}
+                </span>
+              ))}
+            </div>
+          )}
           <div className="mt-3 p-3 bg-slate-900 rounded-lg overflow-x-auto">
-            <pre className="text-[11px] text-emerald-400 mono">
-              {JSON.stringify(event.parsedData || event.data, null, 2)}
+            <pre className="text-[11px] text-emerald-400 mono whitespace-pre-wrap break-words">
+              {formattedPayload}
             </pre>
           </div>
         </div>
