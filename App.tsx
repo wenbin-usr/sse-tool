@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { parseRawSSE, reconstructMessage } from './services/sseParser';
 import { SSEEvent, MessageState, ClaudeChatHistory, SSEFormat } from './types';
 import EventItem from './components/EventItem';
@@ -69,6 +69,56 @@ const EXAMPLE_HTTP = `{
         }
     ]
 }`;
+
+// Bailian (DashScope) native request body: model + input.messages + parameters.
+const EXAMPLE_BAILIAN_REQUEST = JSON.stringify(
+  {
+    model: 'qwen3-max',
+    input: {
+      messages: [
+        { role: 'system', content: [{ text: '你是一个乐于助人的助手。' }] },
+        { role: 'user', content: [{ text: '杭州今天天气怎么样？' }] },
+        {
+          role: 'assistant',
+          content: [{ text: '我先查一下天气。' }],
+          tool_calls: [
+            {
+              id: 'call_1',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '{"city":"杭州"}' },
+            },
+          ],
+        },
+        {
+          role: 'tool',
+          name: 'get_weather',
+          tool_call_id: 'call_1',
+          content: '{"temperature":18,"weather":"晴"}',
+        },
+      ],
+    },
+    parameters: {
+      result_format: 'message',
+      incremental_output: true,
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'get_weather',
+            description: '查询指定城市的实时天气',
+            parameters: {
+              type: 'object',
+              properties: { city: { type: 'string', description: '城市名' } },
+              required: ['city'],
+            },
+          },
+        },
+      ],
+    },
+  },
+  null,
+  2,
+);
 
 // Bailian/DashScope example built from real JSON objects so escaping stays valid.
 const BAILIAN_REQUEST_ID = '8b26e699-411a-9bb6-9ec2-2314a3af5a72';
@@ -205,13 +255,83 @@ const FORMAT_META: Record<SSEFormat, { label: string; className: string }> = {
   unknown: { label: 'UNKNOWN', className: 'bg-slate-100 text-slate-600 border-slate-200' },
 };
 
+const CLAUDE_PART_TYPES = new Set(['text', 'thinking', 'tool_use', 'tool_result', 'image', 'document']);
+
+/** Infer which request-body convention a pasted request JSON follows. */
+const detectRequestFormat = (json: any, messages: any[]): SSEFormat => {
+  if (Array.isArray(json?.input?.messages)) return 'bailian';
+  if (json?.parameters) return 'bailian';
+
+  const hasClaudeParts = messages.some(
+    (msg) =>
+      Array.isArray(msg?.content) &&
+      msg.content.some((part: any) => part?.type && CLAUDE_PART_TYPES.has(part.type)),
+  );
+  if (json?.system || hasClaudeParts) return 'claude';
+
+  const hasOpenAIShape = messages.some(
+    (msg) => msg?.role === 'tool' || Array.isArray(msg?.tool_calls) || typeof msg?.reasoning_content === 'string',
+  );
+  if (hasOpenAIShape) return 'openai';
+
+  return 'unknown';
+};
+
+const MIN_LEFT_WIDTH = 18;
+const MAX_LEFT_WIDTH = 70;
+
 const App: React.FC = () => {
   const [inputText, setInputText] = useState('');
   const [viewMode, setViewMode] = useState<'sse' | 'dialogue'>('sse');
   const [events, setEvents] = useState<SSEEvent[]>([]);
   const [messageState, setMessageState] = useState<MessageState>({ blocks: [] });
   const [chatHistory, setChatHistory] = useState<ClaudeChatHistory | null>(null);
+  const [requestFormat, setRequestFormat] = useState<SSEFormat>('unknown');
   const [cumulative, setCumulative] = useState(false);
+  const [leftWidth, setLeftWidth] = useState(33.33);
+  const [isResizing, setIsResizing] = useState(false);
+
+  const mainRef = useRef<HTMLElement>(null);
+  const isResizingRef = useRef(false);
+
+  const handleResizeStart = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    isResizingRef.current = true;
+    setIsResizing(true);
+  }, []);
+
+  useEffect(() => {
+    const handleMove = (e: PointerEvent) => {
+      if (!isResizingRef.current || !mainRef.current) return;
+      const rect = mainRef.current.getBoundingClientRect();
+      const pct = ((e.clientX - rect.left) / rect.width) * 100;
+      setLeftWidth(Math.min(MAX_LEFT_WIDTH, Math.max(MIN_LEFT_WIDTH, pct)));
+    };
+
+    const handleEnd = () => {
+      if (!isResizingRef.current) return;
+      isResizingRef.current = false;
+      setIsResizing(false);
+    };
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleEnd);
+    window.addEventListener('pointercancel', handleEnd);
+    return () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleEnd);
+      window.removeEventListener('pointercancel', handleEnd);
+    };
+  }, []);
+
+  useEffect(() => {
+    document.body.style.userSelect = isResizing ? 'none' : '';
+    document.body.style.cursor = isResizing ? 'col-resize' : '';
+    return () => {
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+  }, [isResizing]);
 
   const handleParse = useCallback(() => {
     if (!inputText.trim()) {
@@ -219,15 +339,30 @@ const App: React.FC = () => {
       setEvents([]);
       setMessageState({ blocks: [] });
       setChatHistory(null);
+      setRequestFormat('unknown');
       return;
     }
 
     try {
-      // Check if it's a direct JSON dialogue history
+      // Dialogue history is either top-level `messages` (Claude / OpenAI
+      // compatible) or `input.messages` (Bailian / DashScope native request).
       const json = JSON.parse(inputText);
-      if (json.messages && Array.isArray(json.messages)) {
+      const messages = Array.isArray(json?.messages)
+        ? json.messages
+        : Array.isArray(json?.input?.messages)
+          ? json.input.messages
+          : null;
+
+      if (messages) {
         setViewMode('dialogue');
-        setChatHistory(json);
+        setRequestFormat(detectRequestFormat(json, messages));
+        setChatHistory({
+          model: json.model ?? json.input?.model,
+          messages,
+          system: json.system,
+          tools: Array.isArray(json.tools) ? json.tools : json.parameters?.tools,
+          parameters: json.parameters,
+        });
         setEvents([]);
         setMessageState({ blocks: [] });
         return;
@@ -238,6 +373,7 @@ const App: React.FC = () => {
 
     // Default to SSE
     setViewMode('sse');
+    setRequestFormat('unknown');
     setChatHistory(null);
     const parsed = parseRawSSE(inputText);
     setEvents(parsed);
@@ -254,6 +390,18 @@ const App: React.FC = () => {
 
   const format = messageState.format ?? 'unknown';
   const formatMeta = FORMAT_META[format];
+
+  const requestMeta = FORMAT_META[requestFormat];
+  const modeBadge =
+    viewMode === 'dialogue'
+      ? {
+          text: requestFormat === 'unknown' ? 'REQUEST' : `REQUEST · ${requestMeta.label}`,
+          className: requestMeta.className,
+        }
+      : {
+          text: format === 'unknown' ? 'SSE' : `SSE · ${formatMeta.label}`,
+          className: formatMeta.className,
+        };
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -286,10 +434,16 @@ const App: React.FC = () => {
             Bailian SSE
           </button>
           <button
+            onClick={() => setInputText(EXAMPLE_BAILIAN_REQUEST)}
+            className="px-3 py-2 text-xs font-semibold text-amber-600 hover:bg-amber-50 rounded-lg transition-colors border border-amber-100"
+          >
+            Bailian JSON
+          </button>
+          <button
             onClick={() => setInputText(EXAMPLE_HTTP)}
             className="px-3 py-2 text-xs font-semibold text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors border border-emerald-100"
           >
-            Dialogue JSON
+            Claude JSON
           </button>
           <button
             onClick={() => {
@@ -298,6 +452,7 @@ const App: React.FC = () => {
               setMessageState({ blocks: [] });
               setChatHistory(null);
               setViewMode('sse');
+              setRequestFormat('unknown');
             }}
             className="px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 rounded-lg transition-colors border border-slate-200"
           >
@@ -306,30 +461,25 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      <main className="flex-1 flex flex-col md:flex-row overflow-hidden">
+      <main ref={mainRef} className="flex-1 flex flex-col md:flex-row overflow-hidden">
         {/* Input Pane */}
-        <div className="w-full md:w-1/3 flex flex-col border-r border-slate-200 h-[calc(100vh-73px)]">
+        <div
+          style={{ '--left-width': `${leftWidth}%` } as React.CSSProperties}
+          className={`w-full md:w-[var(--left-width)] md:flex-none md:shrink-0 flex flex-col h-[calc(100vh-73px)] ${
+            isResizing ? '' : 'transition-[width] duration-150'
+          }`}
+        >
           <div className="p-4 bg-slate-50 border-b border-slate-200">
             <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 flex justify-between items-center gap-2">
               <span>RAW DATA INPUT</span>
-              <span
-                className={`px-2 py-0.5 rounded border font-bold ${
-                  viewMode === 'dialogue'
-                    ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
-                    : formatMeta.className
-                }`}
-              >
-                {viewMode === 'dialogue'
-                  ? 'DIALOGUE'
-                  : format === 'unknown'
-                    ? 'SSE'
-                    : `SSE · ${formatMeta.label}`}
+              <span className={`px-2 py-0.5 rounded border font-bold ${modeBadge.className}`}>
+                {modeBadge.text}
               </span>
             </div>
             <textarea
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              placeholder="Paste an SSE stream (Claude, OpenAI compatible or Bailian/DashScope), or a Claude dialogue JSON..."
+              placeholder="Paste an SSE stream (Claude, OpenAI compatible or Bailian/DashScope), or a request JSON (Claude / Bailian)..."
               className="w-full h-48 p-4 bg-white border border-slate-200 rounded-xl shadow-inner focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all outline-none text-[10px] mono resize-none"
             />
             {viewMode === 'sse' && (
@@ -377,28 +527,51 @@ const App: React.FC = () => {
                     <path d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                 </div>
-                <h3 className="font-bold text-slate-700">Dialogue Mode Active</h3>
+                <h3 className="font-bold text-slate-700">Request JSON Mode</h3>
                 <p className="text-xs text-slate-500 leading-relaxed">
-                  Direct conversation history detected.
+                  A complete request body was detected.
                   <br />
-                  Visualizing the full turn sequence on the right.
+                  Visualizing the full message sequence on the right.
                 </p>
               </div>
             )}
           </div>
         </div>
 
+        {/* Resize Handle */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize panes"
+          onPointerDown={handleResizeStart}
+          className={`hidden md:flex w-2 shrink-0 items-center justify-center cursor-col-resize touch-none select-none z-[6] transition-colors ${
+            isResizing ? 'bg-indigo-400' : 'bg-slate-200 hover:bg-indigo-300'
+          }`}
+        >
+          <div
+            className={`h-12 w-0.5 rounded-full transition-colors ${
+              isResizing ? 'bg-white' : 'bg-slate-400'
+            }`}
+          />
+        </div>
+
         {/* View Pane */}
-        <div className="w-full md:w-2/3 flex flex-col h-[calc(100vh-73px)] bg-slate-50">
+        <div className="w-full md:flex-1 md:min-w-0 flex flex-col h-[calc(100vh-73px)] bg-slate-50">
           <div className="px-6 py-4 bg-white border-b border-slate-200 flex items-center justify-between shadow-sm z-[5]">
             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
               Visual Reconstruction
             </span>
-            {viewMode === 'sse' && format !== 'unknown' && (
-              <span className={`px-2 py-0.5 rounded border text-[10px] font-bold ${formatMeta.className}`}>
-                {formatMeta.label}
-              </span>
-            )}
+            {viewMode === 'sse'
+              ? format !== 'unknown' && (
+                  <span className={`px-2 py-0.5 rounded border text-[10px] font-bold ${formatMeta.className}`}>
+                    {formatMeta.label}
+                  </span>
+                )
+              : (
+                  <span className={`px-2 py-0.5 rounded border text-[10px] font-bold ${requestMeta.className}`}>
+                    {modeBadge.text}
+                  </span>
+                )}
           </div>
           <div className="flex-1 overflow-y-auto p-8 scroll-smooth">
             {viewMode === 'sse' ? (

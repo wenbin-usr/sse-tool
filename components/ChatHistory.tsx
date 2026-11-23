@@ -19,8 +19,8 @@ const PartRenderer: React.FC<{ part: ClaudePart; role: string }> = ({ part, role
       if (isStdout) textColorClass = 'bg-slate-800 text-slate-200 p-2 rounded mono text-xs';
 
       return (
-        <div className={`text-sm leading-relaxed mb-3 ${textColorClass}`}>
-          <div dangerouslySetInnerHTML={{ __html: part.text?.replace(/\n/g, '<br/>') || '' }} />
+        <div className={`text-sm leading-relaxed mb-3 whitespace-pre-wrap break-words ${textColorClass}`}>
+          {part.text}
         </div>
       );
     
@@ -51,7 +51,7 @@ const PartRenderer: React.FC<{ part: ClaudePart; role: string }> = ({ part, role
           </div>
           <div className="p-3 bg-slate-900">
             <pre className="text-xs text-indigo-300 mono overflow-x-auto whitespace-pre-wrap">
-              {JSON.stringify(part.input, null, 2)}
+              {typeof part.input === 'string' ? part.input : JSON.stringify(part.input, null, 2)}
             </pre>
           </div>
         </div>
@@ -61,7 +61,9 @@ const PartRenderer: React.FC<{ part: ClaudePart; role: string }> = ({ part, role
       return (
         <div className={`mb-4 border rounded-lg overflow-hidden ${part.is_error ? 'bg-red-50 border-red-100' : 'bg-emerald-50 border-emerald-100'}`}>
           <div className={`px-4 py-2 border-b flex items-center justify-between ${part.is_error ? 'bg-red-100/50 border-red-100 text-red-700' : 'bg-emerald-100/50 border-emerald-100 text-emerald-700'}`}>
-            <span className="text-[10px] font-bold uppercase tracking-widest">Tool Result</span>
+            <span className="text-[10px] font-bold uppercase tracking-widest">
+              Tool Result{part.name ? `: ${part.name}` : ''}
+            </span>
             <span className="text-[10px] mono opacity-50">{part.tool_use_id}</span>
           </div>
           <div className="p-4 overflow-x-auto">
@@ -87,10 +89,71 @@ const normalizeParts = (content: ClaudeMessage['content']): ClaudePart[] => {
   return Array.isArray(content) ? content : [];
 };
 
+/** Tool arguments arrive as a JSON string in OpenAI / DashScope requests. */
+const parseArguments = (raw: any): any => {
+  if (typeof raw !== 'string') return raw ?? {};
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return raw;
+  }
+};
+
+const toToolUseParts = (toolCalls: any[]): ClaudePart[] =>
+  toolCalls.map((toolCall: any, index: number) => ({
+    type: 'tool_use',
+    id: toolCall?.id || `call_${index}`,
+    name: toolCall?.function?.name ?? toolCall?.name,
+    input: parseArguments(toolCall?.function?.arguments ?? toolCall?.arguments),
+  }));
+
+/**
+ * Build the renderable parts for a message, covering Claude content blocks as
+ * well as OpenAI / DashScope `reasoning_content`, `tool_calls` and `role:"tool"`.
+ */
+const buildParts = (msg: ClaudeMessage): ClaudePart[] => {
+  const parts: ClaudePart[] = [];
+
+  if (typeof msg.reasoning_content === 'string' && msg.reasoning_content.trim()) {
+    parts.push({ type: 'thinking', thinking: msg.reasoning_content });
+  }
+
+  if (msg.role === 'tool') {
+    parts.push({
+      type: 'tool_result',
+      name: msg.name,
+      tool_use_id: msg.tool_call_id,
+      content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2),
+    });
+    return parts;
+  }
+
+  for (const part of normalizeParts(msg.content)) {
+    // DashScope text parts look like `{ "text": "..." }` without a `type`.
+    const normalized: ClaudePart =
+      !part.type && typeof part.text === 'string' ? { ...part, type: 'text' } : part;
+    if (normalized.type === 'text' && !normalized.text) continue;
+    parts.push(normalized);
+  }
+
+  if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+    parts.push(...toToolUseParts(msg.tool_calls));
+  }
+
+  return parts;
+};
+
 const ChatHistory: React.FC<ChatHistoryProps> = ({ history }) => {
   const systemBlocks = typeof history.system === 'string'
     ? [{ type: 'text', text: history.system }]
     : (Array.isArray(history.system) ? history.system : []);
+
+  // DashScope request parameters; `tools` is rendered in its own section.
+  const parameterEntries = history.parameters
+    ? Object.entries(history.parameters).filter(([key]) => key !== 'tools')
+    : [];
 
   return (
     <div className="space-y-12 pb-12">
@@ -98,7 +161,7 @@ const ChatHistory: React.FC<ChatHistoryProps> = ({ history }) => {
       <div className="flex flex-wrap gap-4 items-center justify-between p-4 bg-white border border-slate-200 rounded-2xl shadow-sm">
         <div>
           <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Active Model</div>
-          <div className="text-sm font-bold text-indigo-600 mono">{history.model}</div>
+          <div className="text-sm font-bold text-indigo-600 mono">{history.model ?? 'unknown'}</div>
         </div>
         <div className="flex gap-4">
           <div className="text-center px-4 border-r border-slate-100 last:border-0">
@@ -114,32 +177,71 @@ const ChatHistory: React.FC<ChatHistoryProps> = ({ history }) => {
 
       {/* Messages */}
       <div className="space-y-8">
-        {history.messages.map((msg, idx) => (
-          <div key={idx} className={`flex flex-col ${msg.role === 'assistant' ? 'items-start' : 'items-end'}`}>
-            <div className={`max-w-[90%] md:max-w-[80%] rounded-2xl p-6 shadow-sm border ${
-              msg.role === 'assistant' 
-                ? 'bg-white border-slate-200 rounded-tl-none' 
-                : 'bg-slate-100 border-slate-200 text-slate-900 rounded-tr-none'
-            }`}>
-              <div className={`text-[10px] font-black uppercase tracking-[0.2em] mb-4 flex items-center gap-2 ${
-                msg.role === 'assistant' ? 'text-indigo-500' : 'text-slate-400'
-              }`}>
-                <span className="w-2 h-2 rounded-full bg-current"></span>
-                {msg.role}
-              </div>
-              
-              <div>
-                {normalizeParts(msg.content).map((part, pIdx) => (
-                  <PartRenderer key={pIdx} part={part} role={msg.role} />
-                ))}
+        {history.messages.map((msg, idx) => {
+          const isUser = msg.role === 'user';
+          const isAssistant = msg.role === 'assistant';
+          const isSystem = msg.role === 'system';
+          const isTool = msg.role === 'tool';
+
+          const widthClass = isSystem ? 'w-full' : 'max-w-[90%] md:max-w-[80%]';
+          const bubbleClass = isAssistant
+            ? 'bg-white border-slate-200 rounded-tl-none'
+            : isSystem
+              ? 'bg-amber-50/60 border-amber-100 rounded-tl-none'
+              : isTool
+                ? 'bg-white border-slate-200 rounded-tl-none'
+                : 'bg-slate-100 border-slate-200 text-slate-900 rounded-tr-none';
+          const labelClass = isAssistant
+            ? 'text-indigo-500'
+            : isSystem
+              ? 'text-amber-600'
+              : isTool
+                ? 'text-emerald-600'
+                : 'text-slate-400';
+
+          return (
+            <div key={idx} className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
+              <div className={`${widthClass} rounded-2xl p-6 shadow-sm border ${bubbleClass}`}>
+                <div className={`text-[10px] font-black uppercase tracking-[0.2em] mb-4 flex items-center gap-2 ${labelClass}`}>
+                  <span className="w-2 h-2 rounded-full bg-current"></span>
+                  {msg.role}
+                  {isTool && msg.name && (
+                    <span className="mono normal-case tracking-normal opacity-70">· {msg.name}</span>
+                  )}
+                </div>
+
+                <div>
+                  {buildParts(msg).map((part, pIdx) => (
+                    <PartRenderer key={pIdx} part={part} role={msg.role} />
+                  ))}
+                </div>
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
       
       {/* System Information Section */}
       <div className="space-y-6">
+        {parameterEntries.length > 0 && (
+          <details className="group border-t border-slate-200 pt-8" open>
+            <summary className="flex items-center justify-between cursor-pointer list-none">
+              <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Request Parameters ({parameterEntries.length})</h3>
+              <svg className="w-4 h-4 text-slate-300 group-open:rotate-180 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M19 9l-7 7-7-7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </summary>
+            <div className="mt-4 border border-slate-200 rounded-xl overflow-hidden bg-white divide-y divide-slate-100">
+              {parameterEntries.map(([key, value]) => (
+                <div key={key} className="flex gap-4 px-4 py-2.5">
+                  <div className="w-40 shrink-0 text-xs font-bold text-slate-500 mono">{key}</div>
+                  <div className="flex-1 text-xs mono text-slate-700 break-all whitespace-pre-wrap">
+                    {value !== null && typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+
         <details className="group border-t border-slate-200 pt-8">
           <summary className="flex items-center justify-between cursor-pointer list-none">
             <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">System Instructions ({systemBlocks.length} Blocks)</h3>
@@ -164,26 +266,35 @@ const ChatHistory: React.FC<ChatHistoryProps> = ({ history }) => {
             <svg className="w-4 h-4 text-slate-300 group-open:rotate-180 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M19 9l-7 7-7-7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
           </summary>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-             {history.tools?.map((tool: any, i: number) => (
-               <div key={i} className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm hover:border-indigo-300 transition-colors">
-                 <div className="flex items-center gap-2 mb-2">
-                   <div className="w-2 h-2 rounded-full bg-indigo-500"></div>
-                   <div className="text-xs font-bold text-slate-800 mono">{tool.name}</div>
+             {history.tools?.map((tool: any, i: number) => {
+               // Claude uses `{ name, description, input_schema }`;
+               // OpenAI / DashScope uses `{ type, function: { name, description, parameters } }`.
+               const fn = tool?.function ?? tool;
+               const name = tool?.name ?? fn?.name;
+               const description = tool?.description ?? fn?.description;
+               const schema = tool?.input_schema ?? fn?.parameters;
+
+               return (
+                 <div key={i} className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm hover:border-indigo-300 transition-colors">
+                   <div className="flex items-center gap-2 mb-2">
+                     <div className="w-2 h-2 rounded-full bg-indigo-500"></div>
+                     <div className="text-xs font-bold text-slate-800 mono">{name}</div>
+                   </div>
+                   <div className="text-xs text-slate-500 leading-relaxed line-clamp-2">
+                     {description}
+                   </div>
+                   {schema && (
+                     <details className="mt-3">
+                       <summary className="text-[9px] font-bold text-slate-400 uppercase cursor-pointer hover:text-indigo-500">View Details & Schema</summary>
+                       <div className="mt-2 text-[11px] text-slate-600 mb-2">{description}</div>
+                       <div className="mt-2 bg-slate-50 rounded p-2 overflow-x-auto">
+                         <pre className="text-[10px] mono text-slate-600">{JSON.stringify(schema, null, 2)}</pre>
+                       </div>
+                     </details>
+                   )}
                  </div>
-                 <div className="text-xs text-slate-500 leading-relaxed line-clamp-2">
-                   {tool.description}
-                 </div>
-                 {tool.input_schema && (
-                   <details className="mt-3">
-                     <summary className="text-[9px] font-bold text-slate-400 uppercase cursor-pointer hover:text-indigo-500">View Details & Schema</summary>
-                     <div className="mt-2 text-[11px] text-slate-600 mb-2">{tool.description}</div>
-                     <div className="mt-2 bg-slate-50 rounded p-2 overflow-x-auto">
-                       <pre className="text-[10px] mono text-slate-600">{JSON.stringify(tool.input_schema, null, 2)}</pre>
-                     </div>
-                   </details>
-                 )}
-               </div>
-             ))}
+               );
+             })}
              {(!history.tools || history.tools.length === 0) && (
                <div className="text-sm text-slate-400 italic col-span-2">No tools defined in this session.</div>
              )}

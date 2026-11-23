@@ -66,14 +66,23 @@ export interface ClaudePart {
 }
 
 export interface ClaudeMessage {
-  role: 'user' | 'assistant';
+  role: string;
   content: string | ClaudePart[];
+  /** OpenAI / DashScope style function calls on assistant messages. */
+  tool_calls?: any[];
+  /** DashScope thinking content on assistant messages. */
+  reasoning_content?: string;
+  /** Set on `role: "tool"` messages to link the result back to its call. */
+  tool_call_id?: string;
+  name?: string;
 }
 
 export interface ClaudeChatHistory {
-  model: string;
+  model?: string;
   messages: ClaudeMessage[];
   system?: string | any[];
   tools?: any[];
   usage?: any;
+  /** DashScope request parameters, e.g. result_format / incremental_output / tools. */
+  parameters?: any;
 }
